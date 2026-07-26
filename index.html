@@ -73,52 +73,48 @@ function roundLabel(startIdx) {
   return `${start} – ${end}`;
 }
 function emptyRound(startIdx) {
-  return { id: uid(), startIdx, servers: [{ id: uid(), name: "", tip: "", carryForward: false, groupId: null }] };
+  return { id: uid(), startIdx, servers: [{ id: uid(), name: "", cash: "", credit: "", carryForward: false, groupId: null }] };
 }
-function emptyBarServer() {
-  return { id: uid(), name: "", cash: "", credit: "" };
-}
-function emptyDraft(type) {
-  const base = { date: new Date().toISOString().slice(0, 10), tipOutPercent: "18", adjustmentLabel: "", adjustmentAmount: "", type: type || "rotation" };
-  if (base.type === "bar") return { ...base, servers: [emptyBarServer()] };
-  return { ...base, rounds: [emptyRound(0)] };
+function emptyDraft() {
+  return { date: new Date().toISOString().slice(0, 10), tipOutPercent: "18", adjustmentLabel: "", adjustmentAmount: "", rounds: [emptyRound(0)] };
 }
 function money(n) {
   const v = Number.isFinite(n) ? n : 0;
   return v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
-function roundTotal(round) { return round.servers.reduce((s, sv) => s + (parseFloat(sv.tip) || 0), 0); }
-function barServerTotal(sv) { return (parseFloat(sv.cash) || 0) + (parseFloat(sv.credit) || 0); }
+function serverTotal(sv) { return (parseFloat(sv.cash) || 0) + (parseFloat(sv.credit) || 0); }
+function roundTotal(round) { return round.servers.reduce((s, sv) => s + serverTotal(sv), 0); }
 function computeShift(shift) {
   const pct = parseFloat(shift.tipOutPercent) || 0;
   const adj = parseFloat(shift.adjustmentAmount) || 0;
-  if (shift.type === "bar") {
-    const cashTotal = shift.servers.reduce((s, sv) => s + (parseFloat(sv.cash) || 0), 0);
-    const creditTotal = shift.servers.reduce((s, sv) => s + (parseFloat(sv.credit) || 0), 0);
-    const total = cashTotal + creditTotal;
-    const barbackCut = Math.round(total * (pct / 100));
-    return { total, barbackCut, takeHome: total - barbackCut + adj, adj, cashTotal, creditTotal };
-  }
   const total = shift.rounds.reduce((sum, r) => sum + roundTotal(r), 0);
+  const cashTotal = shift.rounds.reduce((sum, r) => sum + r.servers.reduce((s, sv) => s + (parseFloat(sv.cash) || 0), 0), 0);
+  const creditTotal = shift.rounds.reduce((sum, r) => sum + r.servers.reduce((s, sv) => s + (parseFloat(sv.credit) || 0), 0), 0);
   const barbackCut = Math.round(total * (pct / 100));
-  return { total, barbackCut, takeHome: total - barbackCut + adj, adj, cashTotal: 0, creditTotal: 0 };
+  return { total, barbackCut, takeHome: total - barbackCut + adj, adj, cashTotal, creditTotal };
 }
 function computeGroupTotals(obj) {
   if (!obj.rounds) return {};
   const groups = {};
   obj.rounds.forEach((r) => r.servers.forEach((sv) => {
     if (!sv.groupId) return;
-    if (!groups[sv.groupId]) groups[sv.groupId] = { total: 0, count: 0 };
-    groups[sv.groupId].total += parseFloat(sv.tip) || 0;
+    if (!groups[sv.groupId]) groups[sv.groupId] = { cash: 0, credit: 0, count: 0 };
+    groups[sv.groupId].cash += parseFloat(sv.cash) || 0;
+    groups[sv.groupId].credit += parseFloat(sv.credit) || 0;
     groups[sv.groupId].count += 1;
   }));
   return groups;
 }
-function effectiveTip(sv, groups) {
-  if (sv.groupId && groups[sv.groupId] && groups[sv.groupId].count > 0) return groups[sv.groupId].total / groups[sv.groupId].count;
-  return parseFloat(sv.tip) || 0;
+function effectiveCash(sv, groups) {
+  if (sv.groupId && groups[sv.groupId] && groups[sv.groupId].count > 0) return groups[sv.groupId].cash / groups[sv.groupId].count;
+  return parseFloat(sv.cash) || 0;
 }
-function effectiveRoundTotal(round, groups) { return round.servers.reduce((sum, sv) => sum + effectiveTip(sv, groups), 0); }
+function effectiveCredit(sv, groups) {
+  if (sv.groupId && groups[sv.groupId] && groups[sv.groupId].count > 0) return groups[sv.groupId].credit / groups[sv.groupId].count;
+  return parseFloat(sv.credit) || 0;
+}
+function effectiveTotal(sv, groups) { return effectiveCash(sv, groups) + effectiveCredit(sv, groups); }
+function effectiveRoundTotal(round, groups) { return round.servers.reduce((sum, sv) => sum + effectiveTotal(sv, groups), 0); }
 function dateKeyOf(y, m, d) { return `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`; }
 function buildMonthCells(year, month) {
   const firstDay = new Date(year, month, 1).getDay();
@@ -234,13 +230,12 @@ function NameAutocomplete({ value, onChange, roster }) {
 }
 
 function ReceiptSummary({ totals }) {
-  const isBar = totals.cashTotal > 0 || totals.creditTotal > 0;
   return (
     <div style={{ marginBottom: 16, borderRadius: "16px 16px 0 0", overflow: "hidden" }}>
       <div style={{ padding: "16px 20px", background: "var(--surface2)" }}>
         <p style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, color: "var(--textMuted)", textAlign: "center", margin: "0 0 12px" }}>Shift Summary</p>
-        {isBar && <Row label="Cash tips" value={totals.cashTotal} muted />}
-        {isBar && <Row label="Credit tips" value={totals.creditTotal} muted />}
+        <Row label="Cash tips" value={totals.cashTotal} muted />
+        <Row label="Credit tips" value={totals.creditTotal} muted />
         <Row label="Total tips" value={totals.total} />
         <Row label="Barback tip-out" value={-totals.barbackCut} muted whole />
         {totals.adj !== 0 && <Row label="Adjustment" value={totals.adj} muted />}
@@ -257,25 +252,14 @@ function ReceiptSummary({ totals }) {
 
 function NewShiftForm(props) {
   const { draft, setDraft, totals, roster, updateServer, addServer, removeServer, addRound, removeRound, setRoundStartIdx, toggleCarryForward,
-    updateBarServer, addBarServer, removeBarServer, onSave, saveError, editingId, onCancelEdit } = props;
+    onSave, saveError, editingId, onCancelEdit } = props;
   const groups = useMemo(() => computeGroupTotals(draft), [draft]);
-  const isBar = draft.type === "bar";
   return (
     <div>
-      {editingId ? (
+      {editingId && (
         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16, padding: "8px 12px", borderRadius: 8, fontSize: 12, background: "var(--surface2)", color: "var(--brassLight)" }}>
-          <span>Editing {isBar ? "bar" : "rotation"} shift from {draft.date}</span>
+          <span>Editing shift from {draft.date}</span>
           <button onClick={onCancelEdit} style={{ background: "none", border: "none", color: "var(--brassLight)", textDecoration: "underline" }}>Cancel</button>
-        </div>
-      ) : (
-        <div style={{ display: "flex", gap: 4, marginBottom: 16, padding: 4, borderRadius: 12, background: "var(--surface)" }}>
-          {[{ id: "rotation", label: "Cocktail Rotation" }, { id: "bar", label: "Bar Shift" }].map((opt) => (
-            <button key={opt.id} onClick={() => setDraft(emptyDraft(opt.id))}
-              style={{ flex: 1, padding: "8px 0", borderRadius: 8, fontSize: 12, fontWeight: 500, border: "none",
-                background: draft.type === opt.id ? "var(--brass)" : "transparent", color: draft.type === opt.id ? "var(--bg)" : "var(--textMuted)" }}>
-              {opt.label}
-            </button>
-          ))}
         </div>
       )}
       <Card>
@@ -283,49 +267,24 @@ function NewShiftForm(props) {
         <input type="date" value={draft.date} onChange={(e) => setDraft((d) => ({ ...d, date: e.target.value }))} className="font-mono" style={inputStyle()} />
       </Card>
 
-      {isBar ? (
-        <Card>
-          <Label>Servers</Label>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {draft.servers.map((sv) => (
-              <div key={sv.id} style={{ display: "flex", flexDirection: "column", gap: 6, paddingBottom: 8, borderBottom: "1px solid var(--line)" }}>
-                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <NameAutocomplete value={sv.name} onChange={(v) => updateBarServer(sv.id, "name", v)} roster={roster} />
-                  <button onClick={() => removeBarServer(sv.id)} style={{ background: "none", border: "none", color: "var(--textMuted)", flexShrink: 0, fontSize: 15 }}>🗑</button>
-                </div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <div style={{ position: "relative", flex: 1 }}>
-                    <span className="font-mono" style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: "var(--textMuted)" }}>$</span>
-                    <input type="number" inputMode="decimal" placeholder="Cash" value={sv.cash} onChange={(e) => updateBarServer(sv.id, "cash", e.target.value)} className="font-mono" style={{ ...inputStyle(), paddingLeft: 20 }} />
-                  </div>
-                  <div style={{ position: "relative", flex: 1 }}>
-                    <span className="font-mono" style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: "var(--textMuted)" }}>$</span>
-                    <input type="number" inputMode="decimal" placeholder="Credit" value={sv.credit} onChange={(e) => updateBarServer(sv.id, "credit", e.target.value)} className="font-mono" style={{ ...inputStyle(), paddingLeft: 20 }} />
-                  </div>
-                </div>
-              </div>
-            ))}
+      {draft.rounds.map((round, ri) => (
+        <Card key={round.id}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 8 }}>
+            <span className="font-mono" style={{ fontSize: 11, padding: "2px 8px", borderRadius: 4, background: "var(--surface2)", color: "var(--textMuted)", flexShrink: 0 }}>R{ri + 1}</span>
+            <select value={round.startIdx} onChange={(e) => setRoundStartIdx(round.id, parseInt(e.target.value, 10))} className="font-mono" style={{ ...inputStyle(), width: "auto", flexShrink: 0 }}>
+              {TIME_PRESETS.map((t, i) => <option key={t} value={i}>{t}</option>)}
+            </select>
+            <span className="font-display" style={{ fontSize: 14, flex: 1, textAlign: "right", color: "var(--brassLight)" }}>
+              → {round.startIdx < TIME_PRESETS.length - 1 ? TIME_PRESETS[round.startIdx + 1] : "2:00 AM"}
+            </span>
+            {draft.rounds.length > 1 && <button onClick={() => removeRound(round.id)} style={{ background: "none", border: "none", color: "var(--textMuted)", flexShrink: 0, fontSize: 16 }}>✕</button>}
           </div>
-          <button onClick={addBarServer} style={{ background: "none", border: "none", display: "flex", alignItems: "center", gap: 4, fontSize: 12, fontWeight: 500, color: "var(--brass)", marginTop: 10 }}>+ Add server</button>
-        </Card>
-      ) : (
-        draft.rounds.map((round, ri) => (
-          <Card key={round.id}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 8 }}>
-              <span className="font-mono" style={{ fontSize: 11, padding: "2px 8px", borderRadius: 4, background: "var(--surface2)", color: "var(--textMuted)", flexShrink: 0 }}>R{ri + 1}</span>
-              <select value={round.startIdx} onChange={(e) => setRoundStartIdx(round.id, parseInt(e.target.value, 10))} className="font-mono" style={{ ...inputStyle(), width: "auto", flexShrink: 0 }}>
-                {TIME_PRESETS.map((t, i) => <option key={t} value={i}>{t}</option>)}
-              </select>
-              <span className="font-display" style={{ fontSize: 14, flex: 1, textAlign: "right", color: "var(--brassLight)" }}>
-                → {round.startIdx < TIME_PRESETS.length - 1 ? TIME_PRESETS[round.startIdx + 1] : "2:00 AM"}
-              </span>
-              {draft.rounds.length > 1 && <button onClick={() => removeRound(round.id)} style={{ background: "none", border: "none", color: "var(--textMuted)", flexShrink: 0, fontSize: 16 }}>✕</button>}
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {round.servers.map((sv) => {
-                const hasNextRound = ri < draft.rounds.length - 1;
-                return (
-                  <div key={sv.id} style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {round.servers.map((sv) => {
+              const hasNextRound = ri < draft.rounds.length - 1;
+              return (
+                <div key={sv.id} style={{ display: "flex", flexDirection: "column", gap: 6, paddingBottom: 8, borderBottom: "1px solid var(--line)" }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     <NameAutocomplete value={sv.name} onChange={(v) => updateServer(round.id, sv.id, "name", v)} roster={roster} />
                     {hasNextRound && (
                       <button onClick={() => toggleCarryForward(round.id, sv.id)}
@@ -335,34 +294,42 @@ function NewShiftForm(props) {
                           border: `1px solid ${sv.carryForward ? "var(--brass)" : "var(--line)"}`,
                           color: sv.carryForward ? "var(--bg)" : "var(--textMuted)" }}>🔗</button>
                     )}
-                    <div style={{ position: "relative", width: 96, flexShrink: 0 }}>
-                      <span className="font-mono" style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: "var(--textMuted)" }}>$</span>
-                      <input type="number" inputMode="decimal" placeholder={sv.carryForward ? "next rd" : "0.00"} disabled={sv.carryForward}
-                        value={sv.tip} onChange={(e) => updateServer(round.id, sv.id, "tip", e.target.value)}
-                        className="font-mono" style={{ ...inputStyle(), paddingLeft: 20, opacity: sv.carryForward ? 0.5 : 1 }} />
-                    </div>
                     <button onClick={() => removeServer(round.id, sv.id)} style={{ background: "none", border: "none", color: "var(--textMuted)", flexShrink: 0, fontSize: 15 }}>🗑</button>
                   </div>
-                );
-              })}
-            </div>
-            {round.servers.some((sv) => sv.groupId && groups[sv.groupId] && groups[sv.groupId].count > 1 && !sv.carryForward) && (
-              <p style={{ fontSize: 12, marginTop: 8, color: "var(--textMuted)" }}>Linked tips split evenly across the rounds they cover.</p>
-            )}
-            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 12 }}>
-              <button onClick={() => addServer(round.id)} style={{ background: "none", border: "none", display: "flex", alignItems: "center", gap: 4, fontSize: 12, fontWeight: 500, color: "var(--brass)" }}>+ Add server</button>
-              <span className="font-mono" style={{ fontSize: 12, color: "var(--textMuted)" }}>${money(effectiveRoundTotal(round, groups))}</span>
-            </div>
-          </Card>
-        ))
-      )}
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <div style={{ position: "relative", flex: 1 }}>
+                      <span className="font-mono" style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: "var(--textMuted)" }}>$</span>
+                      <input type="number" inputMode="decimal" placeholder={sv.carryForward ? "next rd" : "Cash"} disabled={sv.carryForward}
+                        value={sv.cash} onChange={(e) => updateServer(round.id, sv.id, "cash", e.target.value)}
+                        className="font-mono" style={{ ...inputStyle(), paddingLeft: 20, opacity: sv.carryForward ? 0.5 : 1 }} />
+                    </div>
+                    <div style={{ position: "relative", flex: 1 }}>
+                      <span className="font-mono" style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", fontSize: 14, color: "var(--textMuted)" }}>$</span>
+                      <input type="number" inputMode="decimal" placeholder={sv.carryForward ? "next rd" : "Credit"} disabled={sv.carryForward}
+                        value={sv.credit} onChange={(e) => updateServer(round.id, sv.id, "credit", e.target.value)}
+                        className="font-mono" style={{ ...inputStyle(), paddingLeft: 20, opacity: sv.carryForward ? 0.5 : 1 }} />
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {round.servers.some((sv) => sv.groupId && groups[sv.groupId] && groups[sv.groupId].count > 1 && !sv.carryForward) && (
+            <p style={{ fontSize: 12, marginTop: 8, color: "var(--textMuted)" }}>Linked tips split evenly across the rounds they cover.</p>
+          )}
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 12 }}>
+            <button onClick={() => addServer(round.id)} style={{ background: "none", border: "none", display: "flex", alignItems: "center", gap: 4, fontSize: 12, fontWeight: 500, color: "var(--brass)" }}>+ Add server</button>
+            <span className="font-mono" style={{ fontSize: 12, color: "var(--textMuted)" }}>${money(effectiveRoundTotal(round, groups))}</span>
+          </div>
+        </Card>
+      ))}
 
-      {!isBar && draft.rounds.length < 4 && (
+      {draft.rounds.length < 4 && (
         <button onClick={addRound} style={{ width: "100%", marginBottom: 16, padding: "10px 0", borderRadius: 12, fontSize: 14, fontWeight: 500, border: "1px dashed var(--line)", background: "none", color: "var(--textMuted)" }}>+ Add round</button>
       )}
 
       <Card>
-        <Label>Barback tip-out % {isBar && "(of cash + credit combined)"}</Label>
+        <Label>Barback tip-out % (of cash + credit combined)</Label>
         <input type="number" inputMode="decimal" value={draft.tipOutPercent} onChange={(e) => setDraft((d) => ({ ...d, tipOutPercent: e.target.value }))} className="font-mono" style={{ ...inputStyle(), marginBottom: 16 }} />
         <Label>Adjustment (optional)</Label>
         <div style={{ display: "flex", gap: 8 }}>
@@ -385,43 +352,29 @@ function NewShiftForm(props) {
 
 function ShiftDetail({ shift, onDelete, onEdit }) {
   const t = computeShift(shift);
-  const isBar = shift.type === "bar";
   const groups = computeGroupTotals(shift);
   return (
     <div style={{ marginTop: 16, paddingTop: 16, borderTop: "1px solid var(--line)" }}>
-      {isBar ? (
-        <div style={{ marginBottom: 12 }}>
+      {shift.rounds.map((r) => (
+        <div key={r.id} style={{ marginBottom: 12 }}>
           <div style={{ display: "flex", fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, color: "var(--textMuted)", margin: "0 0 4px" }}>
-            <span style={{ flex: 1 }}>Server</span><span style={{ width: 60, textAlign: "right" }}>Cash</span><span style={{ width: 60, textAlign: "right" }}>Credit</span>
+            <span style={{ flex: 1 }}>{roundLabel(r.startIdx ?? 0)}</span><span style={{ width: 55, textAlign: "right" }}>Cash</span><span style={{ width: 55, textAlign: "right" }}>Credit</span>
           </div>
-          {shift.servers.map((sv) => (
-            <div key={sv.id} style={{ display: "flex", fontSize: 14, padding: "2px 0" }}>
-              <span style={{ flex: 1 }}>{sv.name || "—"}</span>
-              <span className="font-mono" style={{ width: 60, textAlign: "right" }}>${money(parseFloat(sv.cash) || 0)}</span>
-              <span className="font-mono" style={{ width: 60, textAlign: "right" }}>${money(parseFloat(sv.credit) || 0)}</span>
-            </div>
-          ))}
+          {r.servers.map((sv) => {
+            const group = sv.groupId ? groups[sv.groupId] : null;
+            return (
+              <div key={sv.id} style={{ display: "flex", fontSize: 14, padding: "2px 0", alignItems: "center" }}>
+                <span style={{ flex: 1 }}>{sv.name || "—"}{group && group.count > 1 && <span style={{ fontSize: 11, marginLeft: 6, color: "var(--textMuted)" }}>(linked)</span>}</span>
+                <span className="font-mono" style={{ width: 55, textAlign: "right" }}>${money(effectiveCash(sv, groups))}</span>
+                <span className="font-mono" style={{ width: 55, textAlign: "right" }}>${money(effectiveCredit(sv, groups))}</span>
+              </div>
+            );
+          })}
         </div>
-      ) : (
-        shift.rounds.map((r) => (
-          <div key={r.id} style={{ marginBottom: 12 }}>
-            <p style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.5, color: "var(--textMuted)", margin: "0 0 4px" }}>{roundLabel(r.startIdx ?? 0)}</p>
-            {r.servers.map((sv) => {
-              const group = sv.groupId ? groups[sv.groupId] : null;
-              const eff = effectiveTip(sv, groups);
-              return (
-                <div key={sv.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 14, padding: "2px 0" }}>
-                  <span>{sv.name || "—"}{group && group.count > 1 && <span style={{ fontSize: 11, marginLeft: 6, color: "var(--textMuted)" }}>(linked, split {group.count} ways)</span>}</span>
-                  <span className="font-mono">${money(eff)}</span>
-                </div>
-              );
-            })}
-          </div>
-        ))
-      )}
+      ))}
       <div style={{ borderTop: "1px dashed var(--line)", paddingTop: 8, marginTop: 8 }}>
-        {isBar && <Row label="Cash tips" value={t.cashTotal} muted />}
-        {isBar && <Row label="Credit tips" value={t.creditTotal} muted />}
+        <Row label="Cash tips" value={t.cashTotal} muted />
+        <Row label="Credit tips" value={t.creditTotal} muted />
         <Row label="Barback tip-out" value={-t.barbackCut} muted whole />
         {t.adj !== 0 && <Row label={shift.adjustmentLabel || "Adjustment"} value={t.adj} muted />}
       </div>
@@ -457,7 +410,7 @@ function HistoryTab(props) {
               <div>
                 <p className="font-display" style={{ fontSize: 16, margin: 0, color: "var(--brassLight)" }}>{dateObj.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}</p>
                 <p style={{ fontSize: 11, margin: "2px 0 0", color: "var(--textMuted)" }}>
-                  {shift.type === "bar" ? `Bar shift · ${shift.servers.length} servers` : `${shift.rounds.length} round${shift.rounds.length !== 1 ? "s" : ""} · ${shift.rounds.reduce((n, r) => n + r.servers.length, 0)} servers`}
+                  {shift.rounds.length} round{shift.rounds.length !== 1 ? "s" : ""} · {shift.rounds.reduce((n, r) => n + r.servers.length, 0)} servers
                 </p>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -551,21 +504,10 @@ function ServerDetail({ rosterEntry, name, shifts, onBack, onDelete }) {
     const shiftDates = new Set(); const history = [];
     shifts.forEach((s) => {
       const y = new Date(s.date + "T00:00:00").getFullYear();
-      if (s.type === "bar") {
-        s.servers.forEach((sv) => {
-          if (sv.name.trim() !== name) return;
-          const tip = barServerTotal(sv);
-          lifetime += tip;
-          if (y === currentYear) yearTotal += tip;
-          appearances += 1; shiftDates.add(s.date);
-          history.push({ date: s.date, round: "Bar shift", tip });
-        });
-        return;
-      }
       const groups = computeGroupTotals(s);
       s.rounds.forEach((r) => r.servers.forEach((sv) => {
         if (sv.name.trim() !== name) return;
-        const tip = effectiveTip(sv, groups);
+        const tip = effectiveTotal(sv, groups);
         lifetime += tip;
         if (y === currentYear) yearTotal += tip;
         appearances += 1; shiftDates.add(s.date);
@@ -664,8 +606,8 @@ function Analytics({ analytics }) {
       </div>
       {(cashTotal > 0 || creditTotal > 0) && (
         <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
-          <StatBox label="Cash tips (bar shifts)" value={`$${money(cashTotal)}`} />
-          <StatBox label="Credit tips (bar shifts)" value={`$${money(creditTotal)}`} />
+          <StatBox label="Cash tips (all-time)" value={`$${money(cashTotal)}`} />
+          <StatBox label="Credit tips (all-time)" value={`$${money(creditTotal)}`} />
         </div>
       )}
       <ChartCard title="Take-home over time"><LineChartSVG data={chartData.map((d) => ({ x: d.date, y: d.takeHome }))} color="#7FA687" /></ChartCard>
@@ -717,7 +659,7 @@ function TipLedger() {
   const [shifts, setShifts] = useState([]);
   const [roster, setRoster] = useState([]);
   const [saveError, setSaveError] = useState("");
-  const [draft, setDraft] = useState(emptyDraft("rotation"));
+  const [draft, setDraft] = useState(emptyDraft());
   const [editingId, setEditingId] = useState(null);
   const [expanded, setExpanded] = useState(null);
   const [historyView, setHistoryView] = useState("list");
@@ -795,7 +737,7 @@ function TipLedger() {
     setDraft((d) => ({ ...d, rounds: d.rounds.map((r) => r.id !== roundId ? r : { ...r, servers: r.servers.map((s) => s.id === serverId ? { ...s, [field]: value } : s) }) }));
   }
   function addServer(roundId) {
-    setDraft((d) => ({ ...d, rounds: d.rounds.map((r) => r.id !== roundId ? r : { ...r, servers: [...r.servers, { id: uid(), name: "", tip: "", carryForward: false, groupId: null }] }) }));
+    setDraft((d) => ({ ...d, rounds: d.rounds.map((r) => r.id !== roundId ? r : { ...r, servers: [...r.servers, { id: uid(), name: "", cash: "", credit: "", carryForward: false, groupId: null }] }) }));
   }
   function removeServer(roundId, serverId) {
     setDraft((d) => ({ ...d, rounds: d.rounds.map((r) => r.id !== roundId ? r : { ...r, servers: r.servers.filter((s) => s.id !== serverId) }) }));
@@ -805,12 +747,6 @@ function TipLedger() {
   }
   function removeRound(roundId) { setDraft((d) => ({ ...d, rounds: d.rounds.filter((r) => r.id !== roundId) })); }
   function setRoundStartIdx(roundId, idx) { setDraft((d) => ({ ...d, rounds: d.rounds.map((r) => r.id === roundId ? { ...r, startIdx: idx } : r) })); }
-
-  function updateBarServer(serverId, field, value) {
-    setDraft((d) => ({ ...d, servers: d.servers.map((s) => s.id === serverId ? { ...s, [field]: value } : s) }));
-  }
-  function addBarServer() { setDraft((d) => ({ ...d, servers: [...d.servers, emptyBarServer()] })); }
-  function removeBarServer(serverId) { setDraft((d) => ({ ...d, servers: d.servers.filter((s) => s.id !== serverId) })); }
 
   function toggleCarryForward(roundId, serverId) {
     setDraft((d) => {
@@ -822,10 +758,10 @@ function TipLedger() {
       if (turningOn) {
         const groupId = sv.groupId || uid();
         return { ...d, rounds: d.rounds.map((r, idx) => {
-          if (idx === ri) return { ...r, servers: r.servers.map((s) => s.id === serverId ? { ...s, carryForward: true, groupId, tip: "" } : s) };
+          if (idx === ri) return { ...r, servers: r.servers.map((s) => s.id === serverId ? { ...s, carryForward: true, groupId, cash: "", credit: "" } : s) };
           if (idx === ri + 1) {
             if (r.servers.some((s) => s.groupId === groupId)) return r;
-            return { ...r, servers: [...r.servers, { id: uid(), name: sv.name, tip: "", carryForward: false, groupId }] };
+            return { ...r, servers: [...r.servers, { id: uid(), name: sv.name, cash: "", credit: "", carryForward: false, groupId }] };
           }
           return r;
         }) };
@@ -842,26 +778,17 @@ function TipLedger() {
   const draftTotals = useMemo(() => computeShift(draft), [draft]);
 
   function startEdit(shift) {
-    if (shift.type === "bar") {
-      setDraft({ date: shift.date, tipOutPercent: String(shift.tipOutPercent), type: "bar", servers: shift.servers.map((s) => ({ ...s })), adjustmentLabel: shift.adjustmentLabel || "", adjustmentAmount: shift.adjustmentAmount ? String(shift.adjustmentAmount) : "" });
-    } else {
-      setDraft({ date: shift.date, tipOutPercent: String(shift.tipOutPercent), type: "rotation", rounds: shift.rounds.map((r) => ({ id: r.id, startIdx: r.startIdx ?? 0, servers: r.servers.map((s) => ({ ...s })) })), adjustmentLabel: shift.adjustmentLabel || "", adjustmentAmount: shift.adjustmentAmount ? String(shift.adjustmentAmount) : "" });
-    }
+    setDraft({ date: shift.date, tipOutPercent: String(shift.tipOutPercent), rounds: shift.rounds.map((r) => ({ id: r.id, startIdx: r.startIdx ?? 0, servers: r.servers.map((s) => ({ ...s })) })), adjustmentLabel: shift.adjustmentLabel || "", adjustmentAmount: shift.adjustmentAmount ? String(shift.adjustmentAmount) : "" });
     setEditingId(shift.id); setTab("new");
   }
-  function cancelEdit() { setEditingId(null); setDraft(emptyDraft("rotation")); }
+  function cancelEdit() { setEditingId(null); setDraft(emptyDraft()); }
 
   function saveShift() {
-    let cleanDraft;
-    if (draft.type === "bar") {
-      cleanDraft = { ...draft, servers: draft.servers.filter((s) => s.name.trim() || parseFloat(s.cash) > 0 || parseFloat(s.credit) > 0) };
-    } else {
-      const cleanRounds = draft.rounds.map((r) => ({ ...r, servers: r.servers.filter((s) => s.name.trim() || parseFloat(s.tip) > 0) })).filter((r) => r.servers.length > 0);
-      cleanDraft = { ...draft, rounds: cleanRounds };
-    }
+    const cleanRounds = draft.rounds.map((r) => ({ ...r, servers: r.servers.filter((s) => s.name.trim() || parseFloat(s.cash) > 0 || parseFloat(s.credit) > 0) })).filter((r) => r.servers.length > 0);
+    const cleanDraft = { ...draft, rounds: cleanRounds };
     if (editingId) persistShifts(shifts.map((s) => s.id === editingId ? { ...cleanDraft, id: editingId } : s));
     else persistShifts([{ ...cleanDraft, id: uid(), createdAt: new Date().toISOString() }, ...shifts]);
-    setEditingId(null); setDraft(emptyDraft("rotation")); setTab("history");
+    setEditingId(null); setDraft(emptyDraft()); setTab("history");
   }
   function deleteShift(id) { persistShifts(shifts.filter((s) => s.id !== id)); if (editingId === id) cancelEdit(); }
 
@@ -879,7 +806,7 @@ function TipLedger() {
     withTotals.forEach((s) => { const dow = new Date(s.date + "T00:00:00").getDay(); if (!weekdayAgg[dow]) weekdayAgg[dow] = { total: 0, count: 0 }; weekdayAgg[dow].total += s.takeHome; weekdayAgg[dow].count += 1; });
     const weekdayData = WEEKDAYS.map((label, idx) => ({ day: label, avg: weekdayAgg[idx] ? Math.round((weekdayAgg[idx].total / weekdayAgg[idx].count) * 100) / 100 : 0 }));
     const roundAgg = {};
-    shifts.filter((s) => s.type !== "bar").forEach((s) => { const groups = computeGroupTotals(s); s.rounds.forEach((r) => { const label = TIME_PRESETS[r.startIdx ?? 0]; if (!roundAgg[label]) roundAgg[label] = { total: 0, count: 0 }; roundAgg[label].total += effectiveRoundTotal(r, groups); roundAgg[label].count += 1; }); });
+    shifts.forEach((s) => { const groups = computeGroupTotals(s); s.rounds.forEach((r) => { const label = TIME_PRESETS[r.startIdx ?? 0]; if (!roundAgg[label]) roundAgg[label] = { total: 0, count: 0 }; roundAgg[label].total += effectiveRoundTotal(r, groups); roundAgg[label].count += 1; }); });
     const roundData = TIME_PRESETS.filter((p) => roundAgg[p]).map((p) => ({ slot: p, avg: Math.round((roundAgg[p].total / roundAgg[p].count) * 100) / 100 }));
     const cashTotal = withTotals.reduce((s, x) => s + (x.cashTotal || 0), 0);
     const creditTotal = withTotals.reduce((s, x) => s + (x.creditTotal || 0), 0);
@@ -889,19 +816,10 @@ function TipLedger() {
   const serverStats = useMemo(() => {
     const map = {};
     shifts.forEach((s) => {
-      if (s.type === "bar") {
-        s.servers.forEach((sv) => {
-          const name = sv.name.trim(); if (!name) return;
-          const tip = barServerTotal(sv);
-          if (!map[name]) map[name] = { name, total: 0, appearances: 0, shiftDates: new Set() };
-          map[name].total += tip; map[name].appearances += 1; map[name].shiftDates.add(s.date);
-        });
-        return;
-      }
       const groups = computeGroupTotals(s);
       s.rounds.forEach((r) => r.servers.forEach((sv) => {
         const name = sv.name.trim(); if (!name) return;
-        const tip = effectiveTip(sv, groups);
+        const tip = effectiveTotal(sv, groups);
         if (!map[name]) map[name] = { name, total: 0, appearances: 0, shiftDates: new Set() };
         map[name].total += tip; map[name].appearances += 1; map[name].shiftDates.add(s.date);
       }));
@@ -948,7 +866,6 @@ function TipLedger() {
         {tab === "new" ? (
           <NewShiftForm draft={draft} setDraft={setDraft} totals={draftTotals} roster={roster} updateServer={updateServer} addServer={addServer} removeServer={removeServer}
             addRound={addRound} removeRound={removeRound} setRoundStartIdx={setRoundStartIdx} toggleCarryForward={toggleCarryForward}
-            updateBarServer={updateBarServer} addBarServer={addBarServer} removeBarServer={removeBarServer}
             onSave={saveShift} saveError={saveError}
             editingId={editingId} onCancelEdit={cancelEdit} />
         ) : tab === "history" ? (
